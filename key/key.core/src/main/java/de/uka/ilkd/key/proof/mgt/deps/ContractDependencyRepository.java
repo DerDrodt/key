@@ -57,6 +57,10 @@ public class ContractDependencyRepository {
      */
     private final Map<IProgramMethod, Set<Contract>> methodToContracts = new HashMap<>();
     /**
+     * A map of contracts to the folder they are contained in
+     */
+    private final Map<Contract, String> contractToFolder = new HashMap<>();
+    /**
      * All contracts for which dependencies have been registered
      */
     private final Set<Contract> contracts = new HashSet<>();
@@ -80,6 +84,10 @@ public class ContractDependencyRepository {
      * A map of dependency arcs to the rule applications that added this arc (even redundant additions). For contract axioms
      */
     private final Map<Pair<Contract, Contract>, List<RuleApp>> modifyingRuleApplications = new HashMap<>();
+    /**
+     * The set of contracts for which dependencies have changed
+     */
+    private final HashSet<Contract> toWrite = new HashSet<>();
 
 
     public ContractDependencyRepository(Services s) {
@@ -94,6 +102,7 @@ public class ContractDependencyRepository {
      * - Add hook to save the information on program shutdown
      */
     public void initializeRepo() {
+        folders = new HashSet<>();
         // Find all contracts for which we must track deps
         for (Contract c : services.getSpecificationRepository().getAllContracts()) {
             // Only consider operational contracts
@@ -106,23 +115,14 @@ public class ContractDependencyRepository {
                 if (!uri.getScheme().equals("file")) {
                     continue;
                 }
-                String path = uri.getPath();
-                add(path, target, c);
+                String filePath = uri.getPath();
+                File f = new File(filePath);
+                Path folder = f.toPath().getParent();
+                folders.add(folder);
+                add(folder.toString(), filePath, target, c);
             }
         }
 
-        // Find all relevant folders; each one has/will have a dep file
-        folders = new HashSet<>();
-        for (String filePath : fileToMethods.keySet()) {
-            File f = new File(filePath);
-            Path folder = f.toPath().getParent();
-            folders.add(folder);
-            String folderS = folder.toString();
-            if (!folderToFiles.containsKey(folderS)) {
-                folderToFiles.put(folderS, new HashSet<>());
-            }
-            folderToFiles.get(folderS).add(filePath);
-        }
         // Store information from the files if available
         try {
             for (Path folder : folders) {
@@ -204,6 +204,7 @@ public class ContractDependencyRepository {
         if (!deps.containsKey(addTo)) {
             throw new IllegalArgumentException("Contract " + addTo.getName() + " is not registered.");
         }
+        toWrite.add(addTo);
         for (Contract a : toAdd) {
             deps.put(addTo, deps.get(addTo).add(a));
             // We must track which rule applications introduce which dependencies because rules can be pruned
@@ -213,6 +214,7 @@ public class ContractDependencyRepository {
             }
             modifyingRuleJustifications.get(p).add(rj);
         }
+        flush();
     }
 
     /**
@@ -225,6 +227,7 @@ public class ContractDependencyRepository {
         if (!deps.containsKey(addTo)) {
             throw new IllegalArgumentException("Contract " + addTo.getName() + " is not registered.");
         }
+        toWrite.add(addTo);
         for (Contract a : toAdd) {
             deps.put(addTo, deps.get(addTo).add(a));
             // We must track which rule applications introduce which dependencies because rules can be pruned
@@ -234,6 +237,7 @@ public class ContractDependencyRepository {
             }
             modifyingRuleApplications.get(p).add(ra);
         }
+        flush();
     }
 
     /**
@@ -246,6 +250,7 @@ public class ContractDependencyRepository {
         if (!deps.containsKey(removeFrom)) {
             throw new IllegalArgumentException("Contract " + removeFrom.getName() + " is not registered.");
         }
+        toWrite.add(removeFrom);
         for (Contract r : toRemove) {
             Pair<Contract, Contract> p = new Pair<>(removeFrom, r);
             if (modifyingRuleJustifications.containsKey(p)) {
@@ -260,6 +265,7 @@ public class ContractDependencyRepository {
                 }
             }
         }
+        flush();
     }
 
     /**
@@ -272,6 +278,7 @@ public class ContractDependencyRepository {
         if (!deps.containsKey(removeFrom)) {
             throw new IllegalArgumentException("Contract " + removeFrom.getName() + " is not registered.");
         }
+        toWrite.add(removeFrom);
         for (Contract r : toRemove) {
             Pair<Contract, Contract> p = new Pair<>(removeFrom, r);
             if (modifyingRuleApplications.containsKey(p)) {
@@ -286,6 +293,7 @@ public class ContractDependencyRepository {
                 }
             }
         }
+        flush();
     }
 
     /**
@@ -363,6 +371,11 @@ public class ContractDependencyRepository {
         }
     }
 
+    /**
+     * Collects the set of contracts from a contract axiom taclet
+     * @param rt The taclet to extract from
+     * @return All contracts relevant to the taclet
+     */
     private ImmutableSet<Contract> extractContractsFromTaclet(RewriteTaclet rt) {
         ImmutableList<VariableCondition> conds = rt.getVariableConditions();
         assert conds.size() == 1 : "unexpected conditions size";
@@ -417,15 +430,30 @@ public class ContractDependencyRepository {
 
     /**
      * Add a contract; update maps
-     * @param path The path of the file of the method
+     * @param folderPath The path to the folder containing the method
+     * @param filePath The filePath of the file of the method
      * @param met The method of the contract
      * @param c The contract
      */
-    private void add(String path, IProgramMethod met, Contract c) {
+    private void add(String folderPath, String filePath, IProgramMethod met, Contract c) {
         deps.put(c, DefaultImmutableSet.nil());
-        addMethodToFile(path, met);
+        addFileToFolder(folderPath, filePath);
+        addMethodToFile(filePath, met);
         addContractToMethod(met, c);
+        addContractToFolder(folderPath, c);
         contracts.add(c);
+    }
+
+    /**
+     * Register a file in a folder
+     * @param folderPath The path of the folder
+     * @param filePath The path of the file
+     */
+    private void addFileToFolder(String folderPath, String filePath) {
+        if (!folderToFiles.containsKey(folderPath)) {
+            folderToFiles.put(folderPath, new HashSet<>());
+        }
+        folderToFiles.get(folderPath).add(filePath);
     }
 
     /**
@@ -450,6 +478,15 @@ public class ContractDependencyRepository {
             methodToContracts.put(met, new HashSet<>());
         }
         methodToContracts.get(met).add(c);
+    }
+
+    /**
+     * Register a contract for a method
+     * @param folderPath The path of the folder
+     * @param c The contract
+     */
+    private void addContractToFolder(String folderPath, Contract c) {
+        contractToFolder.put(c, folderPath);
     }
 
     /**
@@ -521,12 +558,32 @@ public class ContractDependencyRepository {
     }
 
     /**
+     * Writes altered data to the dependency files
+     */
+    private void flush() {
+        try {
+            writeToFiles();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
      * Update the dependency files
      * @throws IOException if writing to any dependency file fails
      */
     private void writeToFiles() throws IOException {
+        Set<String> alteredFolders = new HashSet<>();
+        for (Contract c : toWrite) {
+            String folder = contractToFolder.get(c);
+            alteredFolders.add(folder);
+        }
+
         Map<String, Map<String, FileDependencyInformation>> folderInfos = new HashMap<>();
         for (Map.Entry<String, Set<String>> entry : folderToFiles.entrySet()) {
+            if (!alteredFolders.contains(entry.getKey())) {
+                continue;
+            }
             Map<String, FileDependencyInformation> fileInfos = new HashMap<>();
             for (String file : entry.getValue()) {
                 FileDependencyInformation fdi = new FileDependencyInformation(file);
@@ -543,12 +600,16 @@ public class ContractDependencyRepository {
             folderInfos.put(entry.getKey(), fileInfos);
         }
         for (Path folder : folders) {
+            if (!alteredFolders.contains(folder.toAbsolutePath().toString())) {
+                continue;
+            }
             Map<String, FileDependencyInformation> fileInfos = folderInfos.get(folder.toString());
             DependencyInformation di = new DependencyInformation(folder.toAbsolutePath().toString(), fileInfos);
             File depFile = folder.resolve(DEPENDENCY_FILE_NAME).toFile();
             DepFileSaver fs = new DepFileSaver(services, di, depFile);
             fs.save();
         }
+        toWrite.clear();
     }
 
     /**
