@@ -21,6 +21,14 @@ public class DepFileTokenizer implements Iterator<DepFileTokenizer.Token> {
 
     public DepFileTokenizer(String input) {
         this.input = input;
+        // Skip initial whitespace and comments
+        while (hasNext() && (getCurrent() == '#' || Character.isWhitespace(getCurrent()))) {
+            if (getCurrent() == '#') {
+                eatUntilNewLine();
+            } else {
+                eat();
+            }
+        }
     }
 
     @Override
@@ -135,7 +143,9 @@ public class DepFileTokenizer implements Iterator<DepFileTokenizer.Token> {
         while (getCurrent() != '\n') {
             eat();
         }
-        eat();
+        if (hasNext()) {
+            eat();
+        }
     }
 
     private void eatUntilNextQuote() {
